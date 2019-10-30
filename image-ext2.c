@@ -30,6 +30,7 @@ struct ext {
 	char *usage_type_args;
 	char *conf_env;
 	char *size_features;
+	char *starting_image_path;
 };
 
 static int ext2_generate_genext2fs(struct image *image)
@@ -38,13 +39,22 @@ static int ext2_generate_genext2fs(struct image *image)
 	struct ext *ext = image->handler_priv;
 	const char *extraargs = cfg_getstr(image->imagesec, "extraargs");
 	const char *label = cfg_getstr(image->imagesec, "label");
+	char *starting_image_arg = NULL;
 
-	ret = systemp(image, "%s %s%s%s --size-in-blocks=%lld -i 16384 '%s' %s",
+	if (ext->starting_image_path) {
+		xasprintf(&starting_image_arg, "-x '%s'", ext->starting_image_path);
+	}
+
+	ret = systemp(image, "%s %s %s%s%s --size-in-blocks=%lld -i 16384 '%s' %s",
 			get_opt("genext2fs"),
+			starting_image_arg ? starting_image_arg : "",
 			image->empty ? "" : "-d '",
 			image->empty ? "" : mountpath(image),
 			image->empty ? "" : "'",
 			image->size / 1024, imageoutfile(image), extraargs);
+
+	if (starting_image_arg)
+		free(starting_image_arg);
 
 	if (ret)
 		return ret;
@@ -125,9 +135,12 @@ static int ext2_generate(struct image *image)
 
 static int ext2_setup(struct image *image, cfg_t *cfg)
 {
+	struct stat s;
 	struct ext *ext = xzalloc(sizeof(*ext));
 	const char *conf = cfg_getstr(image->imagesec, "mke2fs-conf");
 	const char *usage_type = cfg_getstr(image->imagesec, "usage-type");
+	const char *starting_image = cfg_getstr(image->imagesec, "starting-image");
+	int ret;
 
 	if (!conf) {
 		conf = cfg_getstr(image->imagesec, "mke2fs_conf");
@@ -155,8 +168,11 @@ static int ext2_setup(struct image *image, cfg_t *cfg)
 	if (ext->use_mke2fs) {
 		int is_large = image->size >= 4ll * 1024 * 1024 * 1024;
 		int is_huge = image->size >= 2048ll * 1024 * 1024 * 1024;
-		struct stat s;
-		int ret;
+
+		if (starting_image) {
+			image_error(image, "'starting-image' option is only used for 'genext2fs'\n");
+			return -EINVAL;
+		}
 
 		if (conf) {
 			/* mke2fs ignores a missing config file, so make sure it exists. */
@@ -190,6 +206,21 @@ static int ext2_setup(struct image *image, cfg_t *cfg)
 		}
 	}
 
+	if (starting_image) {
+		if (starting_image[0] == '/')
+			xasprintf(&ext->starting_image_path, "%s", starting_image);
+		else
+			xasprintf(&ext->starting_image_path, "%s/%s", inputpath(),
+					  starting_image);
+
+		ret = stat(ext->starting_image_path, &s);
+		if (ret) {
+			image_error(image, "'starting-image' file (%s) does not exist: %s\n",
+						starting_image, strerror(errno));
+			return -errno;
+		}
+	}
+
 	image->handler_priv = ext;
 
 	return 0;
@@ -199,6 +230,7 @@ static cfg_opt_t ext_opts[] = {
 	CFG_STR("root-owner", "0:0", CFGF_NONE),
 	CFG_STR("extraargs", "", CFGF_NONE),
 	CFG_STR("features", NULL, CFGF_NONE),
+	CFG_STR("starting-image", 0, CFGF_NONE),
 	CFG_STR("label", 0, CFGF_NONE),
 	CFG_STR("fs-timestamp", NULL, CFGF_NONE),
 	CFG_BOOL("use-mke2fs", cfg_false, CFGF_NONE),
